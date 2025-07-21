@@ -205,6 +205,25 @@ def capture_loop(serial_port, fifo_path, baudrate):
                 # Extract the 13-byte SocketCAN frame
                 # This is from buffer[2] to buffer[14] in your Teensy code
                 socketcan_frame = current_packet_candidate[2 : 2 + SOCKETCAN_FRAME_LEN]
+
+                # --- 2. WRITE PCAP PACKET HEADER (FOR EACH PACKET) ---
+                # https://wiki.wireshark.org/Development/LibpcapFileFormat
+                # Timestamps for packet: seconds and microseconds since epoch
+                # Captured length and Original length
+                current_time = time.time()
+                ts_sec = int(current_time)
+                ts_usec = int((current_time - ts_sec) * 1_000_000) # Convert fraction to microseconds
+
+                pcap_packet_header = struct.pack(
+                    '<IIII',
+                    ts_sec,             # Timestamp seconds
+                    ts_usec,            # Timestamp microseconds
+                    SOCKETCAN_FRAME_LEN,# Captured packet length
+                    SOCKETCAN_FRAME_LEN # Original packet length
+                )
+                fifo.write(pcap_packet_header)
+                # --- END PCAP PACKET HEADER ---
+
                 
                 fifo.write(socketcan_frame)
                 fifo.flush() # Ensure data is written immediately
