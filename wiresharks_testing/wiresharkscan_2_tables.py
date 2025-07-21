@@ -189,6 +189,10 @@ def main():
     parser.add_argument("--extcap-version", action="store_true", help="Print extcap version")
     parser.add_argument("--capture", action="store_true", help="Start capturing")
     parser.add_argument("--fifo", help="Named pipe (FIFO) to write captured data to")
+
+    # --- ADD THIS LINE FOR --extcap-config ---
+    parser.add_argument("--extcap-config", action="store_true", help="List configuration options for a given interface")
+    # --- END ADDITION ---
     
     # Custom arguments for our specific extcap
     parser.add_argument("--serial-port", required=False, help="Serial port to connect to (e.g., COM4 or /dev/ttyACM0)")
