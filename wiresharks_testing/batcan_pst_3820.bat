@@ -1,0 +1,1 @@
+@"C:\Users\bbroo\cankick\python_serial_thing\.venv\Scripts\python.exe" "%~dp0\wiresharkscan_2_tables.py" %*
