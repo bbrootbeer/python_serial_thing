@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import time
 import sys
 import serial
 import argparse
@@ -69,7 +70,8 @@ def print_extcap_config():
 def capture_loop(serial_port, fifo_path, baudrate):
     """
     Main capture loop: reads from serial, parses custom frames, and writes
-    SocketCAN frames to the FIFO.
+    SocketCAN frames to the FIFO, prepended with a pcap global header
+    and per-packet pcap headers.
     """
     try:
         ser = serial.Serial(serial_port, baudrate, timeout=0.1)
@@ -84,16 +86,64 @@ def capture_loop(serial_port, fifo_path, baudrate):
         sys.stderr.write(f"extcap: Writing to FIFO: {fifo_path or 'stdout'}\n")
         sys.stderr.flush()
 
+        # --- 1. WRITE PCAP GLOBAL HEADER (ONCE) ---
+        # https://wiki.wireshark.org/Development/LibpcapFileFormat
+        # Magic Number (0xA1B2C3D4 for little-endian, 0xD4C3B2A1 for big-endian)
+        # Version (2.4 recommended)
+        # Time Zone Offset (0)
+        # Sigfigs (0)
+        # Snaplen (max packet length, 0xFFFF means no limit for 16-bit, or a large number for 32-bit)
+        # Link-layer type (DLT) - DLT_SOCKETCAN (227)
+
+        # Using '<' for little-endian byte order
+        pcap_global_header = struct.pack(
+            '<IHIIII',
+            0xA1B2C3D4,  # magic_number (little-endian)
+            0x0002,      # version_major (2)
+            0x0004,      # version_minor (4)
+            0,           # tz_offset (GMT, in seconds)
+            0,           # sigfigs (accuracy of timestamps, usually 0)
+            65535,       # snaplen (max bytes per packet, 65535 is common, or large enough for CAN)
+            DLT_SOCKETCAN# linktype (227 for Linux SocketCAN)
+        )
+        fifo.write(pcap_global_header)
+        fifo.flush() # IMPORTANT: Ensure header is written immediately
+        sys.stderr.write(f"extcap: Wrote pcap global header: {pcap_global_header.hex()}\n")
+        sys.stderr.flush()
+        # --- END PCAP GLOBAL HEADER ---
+
         # Partial packet buffer
         partial_packet = b''
         
-        while True:
+        # while True:
+        #     # Read all available bytes
+        #     try:
+        #         data = ser.read(ser.in_waiting or 1) # Read at least 1 byte if available, or all
+        #     except Exception as e:
+        #         sys.stderr.write(f"extcap: Serial read error: {e}\n")
+        #         sys.stderr.flush()
+        #         continue
+
+        while True: # Try to find and process a full packet
             # Read all available bytes
             try:
-                data = ser.read(ser.in_waiting or 1) # Read at least 1 byte if available, or all
+                # Adding some more debug here to see if serial is actually reading
+                bytes_to_read = ser.in_waiting or 1
+                # sys.stderr.write(f"extcap: Checking serial for {bytes_to_read} bytes...\n") # Can be noisy
+                # sys.stderr.flush()
+                data = ser.read(bytes_to_read)
+                if data:
+                    # sys.stderr.write(f"extcap: Read {len(data)} bytes: {data.hex()}\n") # Can be noisy
+                    pass # Keep this for intense debugging if needed
+                # else:
+                    # sys.stderr.write("extcap: No data read from serial (timeout or empty).\n") # Can be noisy
+                # sys.stderr.flush()
+
             except Exception as e:
                 sys.stderr.write(f"extcap: Serial read error: {e}\n")
                 sys.stderr.flush()
+                # Consider adding a small sleep here to prevent busy-looping on errors
+                time.sleep(0.01)
                 continue
 
             if not data:
