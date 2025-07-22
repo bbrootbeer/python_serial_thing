@@ -5,7 +5,7 @@ import sys
 import serial
 import argparse
 import os
-import struct # For packing/unpacking if needed, though not strictly required for this fixed layout
+import struct
 
 # --- IMPORT THE CRC16 LOOKUP TABLE ---
 from crc16_ccitt_table import crc16_table # This line imports the table from your file
@@ -16,12 +16,28 @@ DLT_SOCKETCAN = 227 # Standard Linux SocketCAN DLT
 EXTCAP_VERSION = "1.0"
 
 # --- Your Custom Protocol Constants ---
-SOF_FLOAT = 0xAA                # First Start-of-Frame byte (floating preamble)
-SOF_WRAPPED = 0x69              # Second Start-of-Frame byte (wrapped, part of CRC)
-SOCKETCAN_FRAME_LEN = 13        # Length of the actual SocketCAN frame
-CRC_LEN = 2                     # Length of the CRC-16
-PACKET_LEN_CRC_COVERED = 1 + SOCKETCAN_FRAME_LEN # Length of data covered by CRC (0x69 + SocketCAN frame) = 1 + 13 = 14 bytes
+SOF_FLOAT = 0xAA                # First Start-of-Frame byte (floating preamble)
+SOF_WRAPPED = 0x69              # Second Start-of-Frame byte (wrapped, part of CRC)
+
+# --- START MODIFICATIONS HERE ---
+# Correct length for the standard Linux 'struct can_frame' that Wireshark DLT_SOCKETCAN expects
+# This includes 4 bytes for CAN ID, 1 byte for DLC, 3 bytes for padding, 8 bytes for data
+WIRESHARK_SOCKETCAN_FRAME_LEN = 16
+
+# This remains 13, as it's the size of the *actual* CAN content within your serial protocol
+# (ID, DLC, 8 data bytes)
+# Let's rename it for clarity to distinguish from Wireshark's expected frame size
+CUSTOM_CAN_CONTENT_LEN = 13
+
+CRC_LEN = 2                     # Length of the CRC-16
+# end modifications here
+CRC_LEN = 2 # Length of the CRC-16
+
+
+# Use CUSTOM_CAN_CONTENT_LEN for your protocol's CRC calculation and total packet length
+PACKET_LEN_CRC_COVERED = 1 + CUSTOM_CAN_CONTENT_LEN # Length of data covered by CRC (0x69 + custom CAN content) = 1 + 13 = 14 bytes
 PACKET_LEN_TOTAL = 1 + PACKET_LEN_CRC_COVERED + CRC_LEN # Total custom packet length (0xAA + 14 bytes + 2 bytes CRC) = 1 + 14 + 2 = 17 bytes
+# --- END MODIFICATIONS HERE ---
 
 # --- CRC-16 CCITT Parameters (matching your Teensy code) ---
 # CRC16_POLY = 0x1021 # No longer directly used in the table-driven function, but good to keep for reference
@@ -98,12 +114,12 @@ def capture_loop(serial_port, fifo_path, baudrate):
         # Using '<' for little-endian byte order
         pcap_global_header = struct.pack(
             '<IHIIIIH',
-            0xA1B2C3D4,  # magic_number (little-endian)
-            0x0002,      # version_major (2)
-            0x0004,      # version_minor (4)
-            0,           # tz_offset (GMT, in seconds)
-            0,           # sigfigs (accuracy of timestamps, usually 0)
-            65535,       # snaplen (max bytes per packet, 65535 is common, or large enough for CAN)
+            0xA1B2C3D4,  # magic_number (little-endian)
+            0x0002,      # version_major (2)
+            0x0004,      # version_minor (4)
+            0,           # tz_offset (GMT, in seconds)
+            0,           # sigfigs (accuracy of timestamps, usually 0)
+            65535,       # snaplen (max bytes per packet, 65535 is common, or large enough for CAN)
             DLT_SOCKETCAN# linktype (227 for Linux SocketCAN)
         )
         
@@ -116,34 +132,16 @@ def capture_loop(serial_port, fifo_path, baudrate):
         # Partial packet buffer
         partial_packet = b''
         
-        # while True:
-        #     # Read all available bytes
-        #     try:
-        #         data = ser.read(ser.in_waiting or 1) # Read at least 1 byte if available, or all
-        #     except Exception as e:
-        #         sys.stderr.write(f"extcap: Serial read error: {e}\n")
-        #         sys.stderr.flush()
-        #         continue
-
         while True: # Try to find and process a full packet
             # Read all available bytes
             try:
-                # Adding some more debug here to see if serial is actually reading
                 bytes_to_read = ser.in_waiting or 1
-                # sys.stderr.write(f"extcap: Checking serial for {bytes_to_read} bytes...\n") # Can be noisy
-                # sys.stderr.flush()
                 data = ser.read(bytes_to_read)
                 if data:
-                    # sys.stderr.write(f"extcap: Read {len(data)} bytes: {data.hex()}\n") # Can be noisy
-                    pass # Keep this for intense debugging if needed
-                # else:
-                    # sys.stderr.write("extcap: No data read from serial (timeout or empty).\n") # Can be noisy
-                # sys.stderr.flush()
-
+                    pass
             except Exception as e:
                 sys.stderr.write(f"extcap: Serial read error: {e}\n")
                 sys.stderr.flush()
-                # Consider adding a small sleep here to prevent busy-looping on errors
                 time.sleep(0.01)
                 continue
 
@@ -152,7 +150,7 @@ def capture_loop(serial_port, fifo_path, baudrate):
 
             partial_packet += data
 
-            while True: # Try to find and process a full packet
+            while True: # Try to find and process a full packet from the buffer
                 # Stage 1: Find SOF_FLOAT (0xAA)
                 sof_float_idx = partial_packet.find(SOF_FLOAT.to_bytes(1, 'little'))
                 if sof_float_idx == -1:
@@ -203,30 +201,52 @@ def capture_loop(serial_port, fifo_path, baudrate):
                 sys.stderr.write(f"extcap: Valid packet received. Raw: {current_packet_candidate.hex().upper()}\n")
                 sys.stderr.flush()
 
-                # Extract the 13-byte SocketCAN frame
-                # This is from buffer[2] to buffer[14] in your Teensy code
-                socketcan_frame = current_packet_candidate[2 : 2 + SOCKETCAN_FRAME_LEN]
+                # --- START CORE MODIFICATIONS FOR SOCKETCAN FRAME CREATION ---
+                # Extract the components of the CAN message from your custom 17-byte serial packet.
+                # Custom Packet Format: 0xAA | 0x69 | CAN_ID(4) | DLC(1) | CAN_DATA(8) | CRC(2)
+                # Indices: 0       1        2-5         6         7-14          15-16
+                can_id_bytes = current_packet_candidate[2:6]
+                dlc_byte = current_packet_candidate[6] # This is already an integer byte
+                can_data_bytes = current_packet_candidate[7:15]
+
+                # Convert the raw CAN ID bytes to an integer for struct.pack
+                can_id_int = struct.unpack('<I', can_id_bytes)[0]
+                
+                # Construct the 16-byte standard Linux 'struct can_frame' payload
+                # Format: '<IB3x8s'
+                #   '<' : little-endian byte order
+                #   'I' : unsigned int (4 bytes) for can_id
+                #   'B' : unsigned char (1 byte) for can_dlc
+                #   '3x': 3 pad bytes (Wireshark expects this for DLT_SOCKETCAN)
+                #   '8s': 8-byte string/bytes for data[8]
+                socketcan_frame_payload = struct.pack(
+                    '<IB3x8s',
+                    can_id_int,         # The 4-byte CAN ID as an integer
+                    dlc_byte,           # The 1-byte DLC as an integer
+                    can_data_bytes      # The 8-byte CAN data as a bytes object
+                )
+
+                sys.stderr.write(f"extcap: Prepared {len(socketcan_frame_payload)}-byte SocketCAN payload: {socketcan_frame_payload.hex().upper()}\n")
+                sys.stderr.flush()
+                # --- END CORE MODIFICATIONS ---
 
                 # --- 2. WRITE PCAP PACKET HEADER (FOR EACH PACKET) ---
-                # https://wiki.wireshark.org/Development/LibpcapFileFormat
-                # Timestamps for packet: seconds and microseconds since epoch
-                # Captured length and Original length
                 current_time = time.time()
                 ts_sec = int(current_time)
                 ts_usec = int((current_time - ts_sec) * 1_000_000) # Convert fraction to microseconds
 
                 pcap_packet_header = struct.pack(
                     '<IIII',
-                    ts_sec,             # Timestamp seconds
-                    ts_usec,            # Timestamp microseconds
-                    SOCKETCAN_FRAME_LEN,# Captured packet length
-                    SOCKETCAN_FRAME_LEN # Original packet length
+                    ts_sec,             # Timestamp seconds
+                    ts_usec,            # Timestamp microseconds
+                    WIRESHARK_SOCKETCAN_FRAME_LEN, # Captured packet length (must be 16)
+                    WIRESHARK_SOCKETCAN_FRAME_LEN  # Original packet length (must be 16)
                 )
                 fifo.write(pcap_packet_header)
                 # --- END PCAP PACKET HEADER ---
 
-                
-                fifo.write(socketcan_frame)
+                # --- Write the 16-byte SocketCAN payload to the FIFO ---
+                fifo.write(socketcan_frame_payload) # Write the correctly structured 16-byte payload
                 fifo.flush() # Ensure data is written immediately
 
                 # Remove the processed packet from the buffer
