@@ -74,58 +74,43 @@ def crc16_ccitt_lookup(data_bytes: bytes, initial_value: int = CRC16_INIT) -> in
 # it's "better" to send a block of things in chunks, rather than evey single line
 # "FLUSH" the contents are actually written to the destination... like the sceen, a file, or a pipe...
 # ```sys.stdout.flush()``` FORCES THE BUFFER TO BE SENT IMMEDIATELY TO THE PIPE WIRESHARK IS READING FROM
-# "Okay, I appreciate you sticking with the Python script for now and taking the time to understand these details. You're hitting on some fundamental concepts of how command-line tools (like extcap) communicate with other programs. This understanding will be useful, especially for other Wireshark extcap activities or any time you deal with scripts that act as interfaces.
+# "So, sys.stdout.flush() is absolutely critical for the extcap interface to work correctly, making sure the handshake between Wireshark and your script happens in real-time."
 
-Let's break down print_extcap_interfaces() and the role of sys.stdout.flush().
+# WHAT IS THE PIPE
+# FUNDAMENTAL CONCEPT OF INTER-PROCESS COMMUNICATION (IPC)
+# seperate programs (processes) on a os talk to each other...
+# This is some "anonymous pipe"
+# a pipe is a one way communication channel between the two processes
+# one way, carries water only one direction...
+# ITS NOT A FILE ON DISK UNLIKE NAMED PIPS (FIFO'S)
+# anonymous pipes don't have a name in the file system, they are created in MEMORY, usually by the parent process
+# WHEN A PARENT PROCESS CREATES A CHILD PROCESS AND SETS UP A PIPE FOR COMMUNICATION
+# THE OS KENEL ALLOCATES A BUFFER IN ITS OWN MEMORY! uhh okay
+# The "write" end of the pipe is connected to the "child process's" "stdout"
+# The "read" end of the pipe is held by the parent process (wireshark in this example)
+# WIRESHARK IS ACTIVELY READING DATA OUT OF THE PIPS KENEL BUFFER
+# SO WHEN YOUR SCRIPT DOES "sys.stdout.flush()" ITS PUSHING DATA INTO THE WRIET END OF THE "ANONYMOUS PIPE"
+# WHERE IS SITE IN THE KENELS MEMORY BUFFER, WAITING TO BE RED
+# wiresahrk is c/c++ application...
+# wiresharks (parent process) prepares:
+# it calls OS function like ```pipe()``` on linux/mcaos or ```CreatePipe()``` on windows...
+# this creates an anonymous pip... and returns two "file descriptors" or handles on windows) one for the read end, and one for the write end...
+# It then forks/spans a new process...
 
-How print_extcap_interfaces() Works with Wireshark
-You are absolutely correct: you don't see this output directly in your typical terminal window when Wireshark runs it.
+# study session two
+# So what makes the pipe... the parent process (wireshark) using operating system calls
+# When wiresahrk needs to run the extcap script, it initiates this "relationship"
+# The operating systems kenel is responsible for creating and managing these inter-process communication mechanisms
+# although we can't see it... wireshark calls ```pipe()``` or ```CreatePipe()``` to create the pipe
+# The operating system is repsonsible for "managing" these inter-process communication mechanisms...
+# the kenel responds by:
+# 1. Allocating a buffer in memory for the pipe
+# 2. Creating two file descriptors (or handles) for the read and write ends of the pipe
+# YEAH I GUESS IT RETURNS THESE TWO FILE DESCRIPTORS/HANDLES WHICH ARE PROBABLY IMPORTANT OR SOMETHING
+# Then wireshark calls ```fork() unix``` or ```CreateProcess() windows```
+# IT CLOSES THE NEW NEW CHILD PROCESS'S DEFAULT ```stdout``` and ```stderr``` file descriptors
+# It then re-opens 
 
-Here's why and what's happening:
-
-Wireshark as the "Parent Process": When you launch Wireshark and go to "Capture" -> "Manage Interfaces" -> "Interfaces" tab, Wireshark needs to know what extcap (external capture) tools are available. To do this, Wireshark actually executes your Python script with a specific command-line argument:
-
-Bash
-
-python your_extcap_script.py --extcap-interfaces
-(Or --extcap-dlts, --extcap-config, etc., for other queries.)
-
-Standard Output Redirection: When Wireshark runs your script, it redirects your script's stdout (Standard Output) and stderr (Standard Error) streams.
-
-sys.stdout (Standard Output): This is where your script prints its machine-readable responses to Wireshark's queries. Wireshark is actively listening to this stream and parsing the text output according to the extcap specification (e.g., looking for lines starting with extcap {, interface {, dlt {, arg {).
-
-sys.stderr (Standard Error): This is typically used for human-readable error messages, warnings, or debug information. Wireshark might display stderr output to the user in a log window, or if you run Wireshark from a console, you might see stderr messages there. Your sys.stderr.write(f"extcap: Starting capture...\n") messages go here.
-
-So, when your script print()s to sys.stdout, it's not going to your terminal; it's going directly into a pipe that Wireshark is reading from.
-
-os.linesep: This is a Python constant that represents the "correct" newline character(s) for the operating system the script is running on. It ensures your output will have the proper line endings whether you're on Windows (\r\n) or Linux/macOS (\n). This is important because extcap expects each definition on a new line.
-
-What sys.stdout.flush() Does
-You're right to question .flush(), as it seems counterintuitive to "forget" or "clear."
-
-Buffering Explained: When you print() something in Python (or write() to any file-like object in most programming languages), the data doesn't necessarily get sent to the underlying operating system immediately. Instead, it's often stored in an internal buffer (a temporary holding area in memory).
-
-Why Buffering? Buffering is done for efficiency. Writing many small pieces of data directly to the OS is slow. It's much faster to collect a chunk of data in memory and then send one larger block to the OS.
-
-When Buffers Normally Clear: Buffers typically get "flushed" (i.e., their contents are actually written to the destination, like the screen, a file, or a pipe) when:
-
-The buffer becomes full.
-
-A newline character is encountered (often for interactive terminal output, but not guaranteed for pipes).
-
-The program explicitly calls flush().
-
-The program exits normally.
-
-The Role of sys.stdout.flush() in extcap:
-
-In the extcap context, Wireshark is expecting a response right now after it makes a specific query (e.g., --extcap-interfaces).
-
-If your script's output remains in Python's internal buffer, Wireshark won't see it, and it might hang, time out, or simply not detect your interface.
-
-sys.stdout.flush() forces the buffered data to be sent immediately to the pipe that Wireshark is reading from. It ensures that Wireshark receives the necessary information without delay. It doesn't "trigger something to read" in the sense of sending a signal, but rather ensures the data is available to be read by Wireshark on its end of the pipe.
-
-So, sys.stdout.flush() is absolutely critical for the extcap interface to work correctly, making sure the handshake between Wireshark and your script happens in real-time."
 
 def print_extcap_interfaces():
     """Prints the extcap interfaces list."""
@@ -159,15 +144,31 @@ def capture_loop(serial_port, fifo_path, baudrate):
     and per-packet pcap headers.
     """
     try:
+        # serial.Serial(xxx,xxx,xxx) is a constructer call, or "call)"
+        # it's calling a special method __init__ of the Serial class from the pyserial library
+        # This creates a new instance, or object, of the Serial class
+        # The newly created "Serial" object is then assigned to the variable "ser"
+        # "ser" is now YOUR HANDLE TO INTERACT WITH THE SERIAL PORT
         ser = serial.Serial(serial_port, baudrate, timeout=0.1)
         # For binary output, direct to buffer
+        
+        # this car, comeoes from ```--fifo``` argument passed to the script by wireshark
+        # when wireshark launches ```extcap``` to start a capture, it creates a named pipe (FIFO) in the file system
+        # it tells your script the path the path to this named pipe via the ```--fifo <path/to/fifo>``` command-line argument
+        # open(fifo_path, 'wb') if fifo_path is provided IT WILL BE PROVIDED BY WIRESHARK
+        # the script opens this named pipe in WRITE BINARY MODE
+        # your script will write "raw" pcap data directly into the named pip
+        # wireshark, will be reading from this very same "named pipe"
         if fifo_path:
             fifo = open(fifo_path, 'wb')
         else:
             # Fallback for direct piping (might not be used by Wireshark)
+            # yeah this is like strictly for if the script is being used without wireshark... so probably never
             fifo = sys.stdout.buffer
 
+        # this line is for debugging
         sys.stderr.write(f"extcap: Starting capture on {serial_port} at {baudrate} baud.\n")
+        # this line is for logging/debugging information 
         sys.stderr.write(f"extcap: Writing to FIFO: {fifo_path or 'stdout'}\n")
         sys.stderr.flush()
 
@@ -181,13 +182,20 @@ def capture_loop(serial_port, fifo_path, baudrate):
         # Link-layer type (DLT) - DLT_SOCKETCAN (227)
 
         # Using '<' for little-endian byte order
+        # I, 0xA1B2C3D4, # magic_number (little-endian), so this is like exactly 4 bytes
+        # H, 0x0002, # version_major (2), exactly 2 bytes
+        # H, 0x0004, # version_minor (4), exactly 2 bytes, but I IS NOT CORRECT, PUT IT IN H
+        # I, 0, # tz_offset (GMT, in seconds), THIS IS HALF A BYTE? THIS IS INSANELY IMPORTANT, unless its just 0x0000
+        # I, 0, # sigfigs (accuracy of timestamps, usually 0), THIS IS HALF A BYTE? THIS IS INSANELY IMPORTANT 0x0000
+        # I, 65535, # snaplen (max bytes per packet, 65535 is common, or large enough for CAN), idk how this translates
+        # H, 227, # linktype (227 for Linux SocketCAN) idk how this translates to hex either...
         pcap_global_header = struct.pack(
-            '<IHIIIIH',
+            '<IHHiIII',
             0xA1B2C3D4, # magic_number (little-endian)
             0x0002, # version_major (2)
             0x0004, # version_minor (4)
-            0, # tz_offset (GMT, in seconds)
-            0, # sigfigs (accuracy of timestamps, usually 0)
+            0, # tz_offset (GMT, in seconds) # this is 0x0000
+            0, # sigfigs (accuracy of timestamps, usually 0) # this is 0x0000
             65535,  # snaplen (max bytes per packet, 65535 is common, or large enough for CAN)
             DLT_SOCKETCAN # linktype (227 for Linux SocketCAN)
         )
@@ -199,13 +207,26 @@ def capture_loop(serial_port, fifo_path, baudrate):
         # --- END PCAP GLOBAL HEADER ---
 
         # Partial packet buffer
-        partial_packet = b''
+        # initializes and empty bytes object... its string tho?
+        # b'' IS NOT a string object, '' with the b prefix is a EMPTY bytes object... for raw binary data
+        partial_packet = b'' # initializes and empty bytes object... its string tho?
         
-        while True: # Try to find and process a full packet
+        while True: # Try to find and process a full packet, it will basically run contiously, until it is stopped
             # Read all available bytes
             try:
-                bytes_to_read = ser.in_waiting or 1
-                data = ser.read(bytes_to_read)
+                # bytes_to_read = ser.in_waiting or 1
+                # ser.in_waiting: This is the key. It tells you how many bytes are *currently* in the serial port's input buffer, waiting to be read.
+                # 'or 1': This is a Pythonic trick. If ser.in_waiting is 0 (meaning no bytes are waiting), it evaluates to 1.
+                #         So, bytes_to_read will be the number of waiting bytes, OR at least 1 byte if nothing is waiting.
+                # Purpose: This makes the ser.read() call below (mostly) non-blocking. It tries to read *available* bytes, or just one if it needs to check.
+                bytes_to_read = ser.in_waiting or 1 # reads bytes waiting in serial, or at least 1
+
+                # data = ser.read(bytes_to_read)
+                # This tries to read `bytes_to_read` bytes from the serial port.
+                # If the port is open but no data is coming in, and bytes_to_read was 1,
+                # ser.read(1) might return an empty bytes object (b'') after a short timeout (if configured),
+                # or it might block briefly until 1 byte arrives. The 'or 1' helps prevent indefinite blocking.
+                data = ser.read(bytes_to_read) # reads data from the serial port
                 if data:
                     pass
             except Exception as e:
@@ -338,6 +359,12 @@ def capture_loop(serial_port, fifo_path, baudrate):
 
 
 def main():
+
+    # this is a argparse standard python library module, makes it easy to use 
+    # argparse is pythons recommended module for parsing command-line arguments (it is built in tho?)
+    # parser is an object created from the ArgumentParser class...
+    # when wireshark launches and extcap plugin... it runs with specific command line arguments...
+    # for example... start capturing and send this data to this FIFO
     parser = argparse.ArgumentParser(description="Teensy CAN over Serial extcap interface for Wireshark")
     parser.add_argument("--extcap-interfaces", action="store_true", help="List available interfaces")
     parser.add_argument("--extcap-dlts", action="store_true", help="List DLTs for a given interface")
@@ -357,26 +384,49 @@ def main():
     parser.add_argument("--serial-port", required=False, help="Serial port to connect to (e.g., COM4 or /dev/ttyACM0)")
     parser.add_argument("--baudrate", type=int, default=115200, help="Serial baud rate (default: 115200)")
 
+    # argparse helps your python script understand command from the outside
+    # wireshark uses specific --ectcap- commands to talk to your script
+    # ```args``` holds all those command calues for your script to use
+    # ```args = parser.parse_args()``` thats where it checks which command it received
     args = parser.parse_args()
 
+    # wireshark runs the script with extcap-interfaces, this is the first thing it does, to discover what plugins are available
+    # The script detects if this argument is "True" and then run runs ```print_extcap_interfaces()```
+    # this pretty much is what displays the interface wowcan on wireshark... because the script prints it to the kernel buffer, which wireshark reads from
+    # so yeah this is basically wireshark running ls, on the script bye running the script with ```--extcap-interfaces```
     if args.extcap_interfaces:
         print_extcap_interfaces()
     elif args.extcap_dlts:
-        # When Wireshark calls --extcap-dlts, it also provides --extcap-interface
+    # if a user selects "wowcan" interface, or if wireshark wants to know more about it, it will run the script AGAIN
+    # this time it will run the script with ```--extcap-dlts``` and also run it with ```---extcap-interface wowcan```
+        # this check ensures that wireshark is asking for DLTs for your specific interface, "wowcan", if it's not available, there is an error
         if not args.extcap_interface or args.extcap_interface != "wowcan": # Ensure it's for our interface
+            # this is what writes the error if there is a "problem" with the interface...
             sys.stderr.write("extcap: --extcap-dlts requires --extcap-interface and must be 'wowcan'\n")
             sys.stderr.flush()
+            # if there is a problem, the script exits, with a non-zero status code, tell the os, and wireshark that an error occured
+            # it also means that the program terminates imediately... running with anything other than zero, is a exit code status
             sys.exit(1)
+        # If the interface is correct, print the DLTs (data link types) supported by this extcap
+        # ```dlt {value=227}{display=Linux SocketCAN (CAN Bus)}{linktype=CAN_2_0}```` this is what wireshark reads
+        # this is pretty important "decoder key" without the correct DLT... without it, wireshark doesn't know if the byte represent ethernet, wifi, usb ect... ro socketcan
         print_extcap_dlt()
     # --- ADD THIS NEW BLOCK ---
+
+    # this is the parts, that the gear icon in wireshark calls...
+    # it runs the script with the ```extcap-config```
     elif args.extcap_config:
         # When Wireshark calls --extcap-config, it also provides --extcap-interface
+        # so wowcan is like the only interface we have for extcap... so, this just makes an error if its not avalable
         if not args.extcap_interface or args.extcap_interface != "wowcan": # Ensure it's for our interface
             sys.stderr.write("extcap: --extcap-config requires --extcap-interface and must be 'wowcan'\n")
             sys.stderr.flush()
             sys.exit(1)
+        # this send the configuration arguments like ```--serial-port``` and ```--baudrate``` so wireshark can display them in the gui`
         print_extcap_config()
     # --- END NEW BLOCK ---
+    
+    # wireshark can querie extcap tool for it's version number, and the script prints `EXTCAP_VERSION = "1.0"`` to stdout
     elif args.extcap_version:
         print(EXTCAP_VERSION)
         sys.stdout.flush()
